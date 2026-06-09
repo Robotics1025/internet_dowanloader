@@ -178,6 +178,20 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────────────────────────────────
+      # Pack the (platform-independent) browser extension into a zip so users
+      # can install it without cloning the repo: download, unzip, then
+      # chrome://extensions → Load unpacked. Packed here only (not in the
+      # Windows job) to avoid attaching the same asset twice.
+      # ─────────────────────────────────────────────────────────────────────
+
+      - name: Pack browser extension
+        run: |
+          cd apps/browser-extension
+          zip -r "$GITHUB_WORKSPACE/DownloadMgr-Browser-Extension.zip" . \
+            -x '*.DS_Store' -x '*/.*'
+          unzip -l "$GITHUB_WORKSPACE/DownloadMgr-Browser-Extension.zip"
+
+      # ─────────────────────────────────────────────────────────────────────
       # When a vX.Y.Z tag is pushed, also attach the bundles to the matching
       # GitHub Release so users can grab them from the Releases page.
       # ─────────────────────────────────────────────────────────────────────
@@ -191,6 +205,7 @@ jobs:
             apps/shell/target/release/bundle/appimage/*.AppImage
             apps/shell/target/release/bundle/deb/*.deb
             apps/shell/target/release/bundle/rpm/*.rpm
+            DownloadMgr-Browser-Extension.zip
           generate_release_notes: true
 
       # On every push to main: update a rolling "latest" pre-release so users
@@ -210,3 +225,4 @@ jobs:
             apps/shell/target/release/bundle/appimage/*.AppImage
             apps/shell/target/release/bundle/deb/*.deb
             apps/shell/target/release/bundle/rpm/*.rpm
+            DownloadMgr-Browser-Extension.zip
