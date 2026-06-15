@@ -474,6 +474,11 @@ User/Extension → POST /api/downloads
   → Return DownloadDTO
 ```
 
+Key decisions in this flow:
+- If `Content-Length` is unknown, the task is still created, but progress percent and ETA remain `None` until the size becomes known.
+- If the server does not support `Accept-Ranges`, the SegmentationPolicy creates a single segment and marks `resume_supported=false`.
+- If filename metadata is missing, the application derives a safe filename from the URL path or falls back to a generated default.
+
 ### 9.2 Segmented Download
 ```
 StartDownloadUseCase
@@ -497,6 +502,12 @@ StartDownloadUseCase
       → EventBus.publish(DownloadCompleted)
 ```
 
+Operational notes:
+- Segment count is capped by both user settings and file size so the system does not create tiny inefficient segments.
+- Each worker writes only inside its byte range and never mutates another segment's temp file.
+- Progress updates are throttled before persistence so the DB is not written on every network chunk.
+- Final completion only occurs after merge and optional checksum verification succeed.
+
 ### 9.3 Pause and Resume
 ```
 Pause:
@@ -510,6 +521,11 @@ Resume:
   → For each: start new worker from start_byte + downloaded_bytes
   → Mark task DOWNLOADING
 ```
+
+Resume rules:
+- If the server previously supported Range but later rejects ranged requests, the resume attempt fails gracefully and the UI offers a restart from zero.
+- Temp files are treated as the source of truth only after their byte counts are reconciled with persisted segment progress.
+- A resumed task reuses the original queue position unless the user explicitly reprioritizes it.
 
 ### 9.4 Segment Failure and Retry
 ```
@@ -525,6 +541,64 @@ SegmentWorker catches exception:
       → Check if all segments exhausted
         → If yes: mark task FAILED, notify user
 ```
+
+Failure handling rules:
+- Transient network errors, timeouts, and 5xx responses are retryable by default.
+- Permanent errors such as 401, 403, 404, or repeated checksum mismatch mark the download as failed without infinite retries.
+- A task is only marked `FAILED` when no viable recovery path remains for the remaining segments.
+
+### 9.5 Queue Scheduling and Concurrency
+```
+QueueService loop
+  → Load active queues ordered by priority
+  → For each queue:
+      → Count active downloads
+      → If active_downloads < max_parallel_downloads:
+          → Pick next QUEUED item by position and schedule rules
+          → Invoke StartDownloadUseCase
+      → Else:
+          → Leave remaining items in QUEUED state
+  → Sleep short interval or wake on queue change event
+```
+
+Scheduling behavior:
+- Queue-level concurrency limits are enforced before any task-level workers are created.
+- Tasks with a future scheduled start time remain queued but ineligible until their time window opens.
+- Global limits can additionally cap total active downloads across all queues.
+
+### 9.6 Cancel and Cleanup
+```
+User → POST /api/downloads/{id}/cancel
+  → CancelDownloadUseCase
+    → Signal active workers to stop
+    → Wait for in-flight chunk writes to finish safely
+    → Delete segment temp files if present
+    → Mark task CANCELLED
+    → Persist terminal state and timestamps
+    → EventBus.publish(DownloadCancelled)
+    → WebSocket broadcasts download.cancelled
+```
+
+Cleanup guarantees:
+- Partial files are deleted for cancelled tasks unless the product later adds a "keep partial data" option.
+- The final merged file is never deleted unless cancellation occurs during post-processing before completion.
+- Cancel is idempotent: repeating the request for an already-cancelled task returns success without side effects.
+
+### 9.7 Browser Extension Handoff
+```
+User clicks "Download with App" in extension
+  → Content script collects page URL, media URL, referrer, and cookies allowed by browser policy
+  → Background service worker sends payload to local desktop API
+  → Desktop API validates origin and payload shape
+  → AddDownloadUseCase creates task
+  → API returns task id and initial metadata
+  → Extension shows success/failure notification to user
+```
+
+Boundary rules:
+- The extension forwards only the metadata required to reproduce the request locally.
+- Restricted headers or protected browser credentials are never fabricated or escalated beyond browser permissions.
+- If the desktop app is offline, the extension surfaces a clear local-connection error and does not silently drop the request.
 
 ---
 
